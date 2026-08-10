@@ -24,6 +24,36 @@ The project uses STM32Cube HAL with PlatformIO and is uploaded/debugged through 
 - ESP32-C3 Super Mini (planned)
 - Suitable external power supplies for the Dynamixel and hobby servos
 
+## Controller PCB
+
+The repository includes the editable KiCad source for the custom controller PCB. The board combines the STM32F411 Black Pill, ESP32-C3 Super Mini, 74LS241 Dynamixel interface, power input, actuator connectors, and development headers on one carrier board.
+
+Open [`pcb/6dof.kicad_pro`](pcb/6dof.kicad_pro) in **KiCad 9.0 or newer** to view or modify the complete project.
+
+### Schematic
+
+<p align="center">
+  <img src="docs/schematic.png" alt="6-DOF robot arm controller schematic">
+</p>
+
+Editable source: [`pcb/6dof.kicad_sch`](pcb/6dof.kicad_sch)
+
+### PCB layout
+
+<p align="center">
+  <img src="docs/pcb_footprint.png" alt="6-DOF robot arm controller PCB layout">
+</p>
+
+Editable source: [`pcb/6dof.kicad_pcb`](pcb/6dof.kicad_pcb)
+
+### 3D preview
+
+<p align="center">
+  <img src="docs/3dpcb.png" alt="3D preview of the 6-DOF robot arm controller PCB">
+</p>
+
+> The KiCad files are active design sources. Review the schematic, complete the design-rule checks, and verify all footprints and routing before ordering a PCB. Gerber files, drill files, and a bill of materials are not included yet.
+
 ## Pin assignment
 
 <p align="center">
@@ -142,6 +172,15 @@ The PlatformIO environment is `genericSTM32F411CE`, using the STM32Cube framewor
 │   ├── main.h
 │   ├── tim.h
 │   └── usart.h
+├── docs/
+│   ├── 3dpcb.png         # Render of the assembled controller PCB
+│   ├── pcb_footprint.png # PCB routing and footprint preview
+│   ├── schematic.png     # Controller schematic preview
+│   └── stm32pinout.png   # STM32 peripheral pin assignment
+├── pcb/
+│   ├── 6dof.kicad_pcb    # Editable PCB layout
+│   ├── 6dof.kicad_pro    # KiCad project settings
+│   └── 6dof.kicad_sch    # Editable schematic
 ├── src/
 │   ├── dynamixel.c       # Protocol 1.0 packet transport and commands
 │   ├── gpio.c            # LED and 74LS241 direction GPIO setup
