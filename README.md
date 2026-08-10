@@ -163,4 +163,4 @@ The PlatformIO environment is `genericSTM32F411CE`, using the STM32Cube framewor
 
 ## License
 
-No project-level license has been added yet. Add a `LICENSE` file before redistributing the firmware.
+This project is open-source software available under the [MIT License](LICENSE).
