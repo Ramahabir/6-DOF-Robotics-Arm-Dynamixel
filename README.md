@@ -26,7 +26,9 @@ The project uses STM32Cube HAL with PlatformIO and is uploaded/debugged through 
 
 ## Pin assignment
 
-![STM32F411CEU6 robot arm controller pinout](docs/stm32pinout.png)
+<p align="center">
+  <img src="docs/stm32pinout.png" alt="STM32F411CEU6 robot arm controller pinout">
+</p>
 
 | Function | STM32 peripheral | Pin | Direction | Notes |
 |---|---|---:|---|---|
