@@ -20,7 +20,9 @@
 #include "main.h"
 #include "usart.h"
 #include "gpio.h"
+#include "tim.h"
 #include "dynamixel.h"
+#include "laserping.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -37,6 +39,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* Set to 0 to restore the complete robot-arm application. */
+#define SERVO_ONLY_TEST 1
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,6 +52,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+#if !SERVO_ONLY_TEST
 static DXL_HandleTypeDef hdxl;
 
 #define BASE_ID       1U
@@ -95,17 +101,21 @@ static const RobotPose startup_animation[] =
   {512U, 365U, 457U, 512U, 55U, ANIMATION_POSE_HOLD_MS}, /* wrist center */
   {512U, 315U, 512U, 512U, 25U, ANIMATION_POSE_HOLD_MS}  /* home */
 };
+#endif /* !SERVO_ONLY_TEST */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+#if !SERVO_ONLY_TEST
 static bool Robot_MoveToPose(const RobotPose *pose, uint32_t timeout_ms);
 static bool Robot_PlayStartupAnimation(void);
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if !SERVO_ONLY_TEST
 static uint16_t PositionDifference(uint16_t actual, uint16_t target)
 {
   return (actual > target) ? (actual - target) : (target - actual);
@@ -191,6 +201,7 @@ static bool Robot_PlayStartupAnimation(void)
 
   return true;
 }
+#endif /* !SERVO_ONLY_TEST */
 /* USER CODE END 0 */
 
 /**
@@ -222,9 +233,89 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART2_UART_Init();
+  MX_TIM3_Init();
   MX_USART1_UART_Init();
   MX_USART6_UART_Init();
+#if !SERVO_ONLY_TEST
+  MX_TIM4_Init();
+  LaserPING_Init(&htim4);
+#endif
+
+#if SERVO_ONLY_TEST
+  /*
+   * Breadboard test mode: MG90S only, with no LaserPING, Dynamixel
+   * initialization, or robot movement. USART1 uses PB6/PB7 in this codebase.
+  */
+  char buffer[128];
+  int length;
+  uint16_t servo_pulse_us = 1000U;
+  int16_t servo_step_us = 10;
+  uint32_t last_servo_move_ms;
+
+  /* Start near 0 degrees on PA6/TIM3_CH1. */
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, servo_pulse_us);
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  last_servo_move_ms = HAL_GetTick();
+
+  HAL_Delay(100U);
+  length = snprintf(buffer, sizeof(buffer),
+                    "MG90S sweeping 0-180-0 degrees on PA6\r\n");
+  if (length > 0)
+  {
+    (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
+                            (uint16_t)length, HAL_MAX_DELAY);
+    (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
+                            (uint16_t)length, HAL_MAX_DELAY);
+  }
+
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
+
+    /* Smoothly sweep approximately 0 -> 180 -> 0 degrees. */
+    if ((now - last_servo_move_ms) >= 20U)
+    {
+      int32_t next_pulse_us = (int32_t)servo_pulse_us + servo_step_us;
+      const char *endpoint = NULL;
+
+      if (next_pulse_us >= 2000)
+      {
+        next_pulse_us = 2000;
+        servo_step_us = -10;
+        endpoint = "180 degrees";
+      }
+      else if (next_pulse_us <= 1000)
+      {
+        next_pulse_us = 1000;
+        servo_step_us = 10;
+        endpoint = "0 degrees";
+      }
+
+      servo_pulse_us = (uint16_t)next_pulse_us;
+      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, servo_pulse_us);
+      last_servo_move_ms = now;
+
+      if (endpoint != NULL)
+      {
+        length = snprintf(buffer, sizeof(buffer), "MG90S: %s (%u us)\r\n",
+                          endpoint, (unsigned int)servo_pulse_us);
+        if (length > 0)
+        {
+          (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
+                                  (uint16_t)length, HAL_MAX_DELAY);
+          (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
+                                  (uint16_t)length, HAL_MAX_DELAY);
+        }
+      }
+    }
+
+    HAL_Delay(1U);
+  }
+#else
+  MX_USART2_UART_Init();
 
   /*
    * UART2: PA2=TX, PA3=RX, 1 Mbps, Dynamixel Protocol 1.0.
@@ -377,12 +468,47 @@ int main(void)
 
   /* ========== END STARTUP SEQUENCE ========== */
 
+  /* Start the first asynchronous LaserPING measurement. */
+  (void)LaserPING_StartMeasurement();
+
   while (1)
   {
     DXL_Result base_result;
     DXL_Result shoulder_result;
     DXL_Result elbow_result;
     DXL_Result wrist_result;
+    uint16_t laser_distance_mm;
+    LaserPING_Status laser_status;
+
+    LaserPING_Process();
+    if (LaserPING_GetResult(&laser_distance_mm, &laser_status))
+    {
+      if (laser_status == LASERPING_STATUS_VALID)
+      {
+        length = snprintf(buffer, sizeof(buffer), "LaserPING: %u mm\r\n",
+                          (unsigned int)laser_distance_mm);
+      }
+      else
+      {
+        const char *laser_error =
+            (laser_status == LASERPING_STATUS_OUT_OF_RANGE) ? "out of range" :
+            (laser_status == LASERPING_STATUS_SENSOR_ERROR) ? "sensor error" :
+                                                             "timeout";
+        length = snprintf(buffer, sizeof(buffer), "LaserPING: %s\r\n",
+                          laser_error);
+      }
+
+      if (length > 0)
+      {
+        (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
+                                (uint16_t)length, HAL_MAX_DELAY);
+        (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
+                                (uint16_t)length, HAL_MAX_DELAY);
+      }
+    }
+
+    /* The driver enforces the sensor's 65 ms minimum measurement interval. */
+    (void)LaserPING_StartMeasurement();
 
     base_result = DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position);
     shoulder_result = DXL_GetPresentPosition(&hdxl, SHOULDER_ID,
@@ -441,82 +567,8 @@ int main(void)
 
     HAL_Delay(100U);
   }
+#endif /* SERVO_ONLY_TEST */
 }
-//   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-//   /* USER CODE BEGIN 2 */
-//   DXL_Init(&hdxl, &huart2, GPIOB, GPIO_PIN_0);
-
-//   HAL_Delay(500);
-
-//   /* Enable torque off Dynamixel ID 1,9,13 */
-//   result = DXL_SetTorque(&hdxl, 1, false);
-//   result = DXL_SetTorque(&hdxl, 9, false);
-//   result = DXL_SetTorque(&hdxl, 13, false);
-
-//   // HAL_Delay(100);
-
-//   /* Set moderate movement speed */
-//   result = DXL_SetMovingSpeed(&hdxl, 1, 100);
-//   result = DXL_SetMovingSpeed(&hdxl, 9, 100);
-//   result = DXL_SetMovingSpeed(&hdxl, 13, 100);
-
-//   HAL_Delay(500);
-
-//   // Set home pose
-//   DXL_SetGoalPosition(&hdxl, 1, 493);
-//   DXL_SetGoalPosition(&hdxl, 9, 308);
-//   DXL_SetGoalPosition(&hdxl, 13, 481);
-
-//     // Wait until servo reach home position
-//   while (1)
-//   {
-//     DXL_GetPresentPosition(&hdxl, 1, &base_raw);
-//     DXL_GetPresentPosition(&hdxl, 9, &shoulder_raw);
-//     DXL_GetPresentPosition(&hdxl, 13, &elbow_raw);
-
-//     if (
-//       (abs((int)base_raw - 493 < 5)) &&
-//       (abs((int)shoulder_raw - 308)) < 5 &&
-//       (abs((int)elbow_raw - 481) < 5))
-//       {
-//         break;
-//       } 
-//   }
-//   /* USER CODE END 2 */
-
-//   /* Infinite loop */
-//   /* USER CODE BEGIN WHILE */
-//   while (1)
-//   {
-//     /* USER CODE END WHILE */
-
-//     DXL_GetPresentPosition(&hdxl, 1, &base_raw);
-//     DXL_GetPresentPosition(&hdxl, 9, &shoulder_raw);
-//     DXL_GetPresentPosition(&hdxl, 13, &elbow_raw);
-
-//     base_angle = DXL_PositionToAngle(base_raw) - BASE_OFFSET;
-//     shoulder_angle = DXL_PositionToAngle(shoulder_raw) - SHOULDER_OFFSET;
-//     elbow_angle = DXL_PositionToAngle(elbow_raw) - ELBOW_OFFSET;
-
-//     char buffer[100];
-
-//     sprintf(buffer,"Base:%.2f Shoulder:%.2f Elbow:%.2f\r\n", base_angle, shoulder_angle, elbow_angle);
-//     HAL_UART_Transmit(
-//       &huart1,
-//       (uint8_t *)buffer,
-//       strlen(buffer),
-//       HAL_MAX_DELAY
-//     );
-//     // MG996R_SetAngle(0);
-//     // HAL_Delay(1000);
-//     // MG996R_SetAngle(90);
-//     // HAL_Delay(1000);
-//     // MG996R_SetAngle(180);
-//     // HAL_Delay(1000);
-//     /* USER CODE BEGIN 3 */
-//   }
-//   /* USER CODE END 3 */
-// }
 
 /**
   * @brief System Clock Configuration
