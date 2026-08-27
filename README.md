@@ -124,14 +124,49 @@ Currently implemented:
 
 Still to be integrated into the active application:
 
-- Initialize USART1 and move its GPIO mapping from PB6/PB7 to PA9/PA10
-- Add and initialize USART6 on PA11/PA12
+- Move the USART1 GPIO mapping from PB6/PB7 to PA9/PA10
 - Initialize TIM1 and TIM3 and start both PWM channels
 - Add coordinated control for all six axes
 - Define the command protocol between the STM32 and ESP32-C3
-- Add data-logger output to the active control loop
 
-At present, `main()` initializes only GPIO and USART2. The other peripheral configuration files exist but are not yet called by the active program.
+### LaserPING mapping data logger
+
+When `SERVO_ONLY_TEST` is set to `0` in `src/main.c`, the active control loop
+outputs one machine-readable record for every completed LaserPING measurement
+on USART1 and USART6 at 115200 baud:
+
+```text
+LP,timestamp_ms,q1_raw,q2_raw,q3_raw,q4_raw,distance_mm,status
+```
+
+Example:
+
+```text
+LP,12540,512,315,487,530,428,0
+```
+
+The joint fields are measured Dynamixel present positions, not commanded goal
+positions. `status` is a bitmask; zero means the laser result and all four joint
+reads are valid. Invalid sensor distances are emitted as zero rather than
+repeating a stale measurement.
+
+| Bit | Value | Meaning |
+|---:|---:|---|
+| 0 | 1 | Laser out of range |
+| 1 | 2 | Laser sensor error |
+| 2 | 4 | Laser timeout or other invalid laser state |
+| 4 | 16 | Base Dynamixel read failed |
+| 5 | 32 | Shoulder Dynamixel read failed |
+| 6 | 64 | Elbow Dynamixel read failed |
+| 7 | 128 | Wrist Dynamixel read failed |
+
+`SERVO_ONLY_TEST` intentionally remains enabled by default because full mode
+enables Dynamixel torque and runs the existing startup movement sequence. Verify
+joint IDs, limits, clearances, and emergency-stop access before changing it.
+
+In the default servo-only test mode, `main()` initializes GPIO, TIM3, USART1,
+and USART6. Full robot mode additionally initializes TIM4 for LaserPING and
+USART2 for the Dynamixel bus.
 
 ## Building and uploading
 

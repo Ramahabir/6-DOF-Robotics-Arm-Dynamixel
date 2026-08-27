@@ -40,7 +40,7 @@
 /* USER CODE BEGIN PD */
 
 /* Set to 0 to restore the complete robot-arm application. */
-#define SERVO_ONLY_TEST 1
+#define SERVO_ONLY_TEST 0
 
 /* USER CODE END PD */
 
@@ -71,6 +71,18 @@ static DXL_HandleTypeDef hdxl;
 #define HOME_SHOULDER_POS   315U
 #define HOME_ELBOW_POS      512U
 #define HOME_WRIST_POS      512U
+
+/*
+ * Machine-readable logger status bitmask. A value of zero means that the
+ * LaserPING result and all four present-position reads are valid.
+ */
+#define LOGGER_STATUS_LASER_OUT_OF_RANGE  (1U << 0)
+#define LOGGER_STATUS_LASER_SENSOR_ERROR  (1U << 1)
+#define LOGGER_STATUS_LASER_TIMEOUT       (1U << 2)
+#define LOGGER_STATUS_BASE_ERROR          (1U << 4)
+#define LOGGER_STATUS_SHOULDER_ERROR      (1U << 5)
+#define LOGGER_STATUS_ELBOW_ERROR         (1U << 6)
+#define LOGGER_STATUS_WRIST_ERROR         (1U << 7)
 
 #define ANIMATION_POSE_TIMEOUT_MS  5000U
 #define ANIMATION_STABLE_READS      3U
@@ -468,7 +480,10 @@ int main(void)
 
   /* ========== END STARTUP SEQUENCE ========== */
 
-  /* Start the first asynchronous LaserPING measurement. */
+  /*
+   * Start the first asynchronous LaserPING measurement. Data records use:
+   * LP,timestamp_ms,q1_raw,q2_raw,q3_raw,q4_raw,distance_mm,status
+   */
   (void)LaserPING_StartMeasurement();
 
   while (1)
@@ -483,89 +498,89 @@ int main(void)
     LaserPING_Process();
     if (LaserPING_GetResult(&laser_distance_mm, &laser_status))
     {
-      if (laser_status == LASERPING_STATUS_VALID)
+      uint32_t sample_timestamp_ms = HAL_GetTick();
+      uint16_t logger_status = 0U;
+
+      /* Zero failed fields rather than publishing a previous sample as new. */
+      base_position = 0U;
+      shoulder_position = 0U;
+      elbow_position = 0U;
+      wrist_position = 0U;
+
+      base_result = DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position);
+      shoulder_result = DXL_GetPresentPosition(&hdxl, SHOULDER_ID,
+                                               &shoulder_position);
+      elbow_result = DXL_GetPresentPosition(&hdxl, ELBOW_ID,
+                                            &elbow_position);
+      wrist_result = DXL_GetPresentPosition(&hdxl, WRIST_ID,
+                                            &wrist_position);
+
+      if (laser_status == LASERPING_STATUS_OUT_OF_RANGE)
       {
-        length = snprintf(buffer, sizeof(buffer), "LaserPING: %u mm\r\n",
-                          (unsigned int)laser_distance_mm);
+        logger_status |= LOGGER_STATUS_LASER_OUT_OF_RANGE;
       }
-      else
+      else if (laser_status == LASERPING_STATUS_SENSOR_ERROR)
       {
-        const char *laser_error =
-            (laser_status == LASERPING_STATUS_OUT_OF_RANGE) ? "out of range" :
-            (laser_status == LASERPING_STATUS_SENSOR_ERROR) ? "sensor error" :
-                                                             "timeout";
-        length = snprintf(buffer, sizeof(buffer), "LaserPING: %s\r\n",
-                          laser_error);
+        logger_status |= LOGGER_STATUS_LASER_SENSOR_ERROR;
       }
+      else if (laser_status != LASERPING_STATUS_VALID)
+      {
+        logger_status |= LOGGER_STATUS_LASER_TIMEOUT;
+      }
+
+      if (base_result != DXL_OK)
+      {
+        logger_status |= LOGGER_STATUS_BASE_ERROR;
+      }
+      if (shoulder_result != DXL_OK)
+      {
+        logger_status |= LOGGER_STATUS_SHOULDER_ERROR;
+      }
+      if (elbow_result != DXL_OK)
+      {
+        logger_status |= LOGGER_STATUS_ELBOW_ERROR;
+      }
+      if (wrist_result != DXL_OK)
+      {
+        logger_status |= LOGGER_STATUS_WRIST_ERROR;
+      }
+
+      if (laser_status != LASERPING_STATUS_VALID)
+      {
+        laser_distance_mm = 0U;
+      }
+
+      length = snprintf(buffer, sizeof(buffer),
+                        "LP,%lu,%u,%u,%u,%u,%u,%u\r\n",
+                        (unsigned long)sample_timestamp_ms,
+                        (unsigned int)base_position,
+                        (unsigned int)shoulder_position,
+                        (unsigned int)elbow_position,
+                        (unsigned int)wrist_position,
+                        (unsigned int)laser_distance_mm,
+                        (unsigned int)logger_status);
 
       if (length > 0)
       {
+        size_t transmit_length = (size_t)length;
+        if (transmit_length >= sizeof(buffer))
+        {
+          transmit_length = sizeof(buffer) - 1U;
+        }
+
         (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
-                                (uint16_t)length, HAL_MAX_DELAY);
+                                (uint16_t)transmit_length, HAL_MAX_DELAY);
         (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
-                                (uint16_t)length, HAL_MAX_DELAY);
+                                (uint16_t)transmit_length, HAL_MAX_DELAY);
       }
+
+      HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin,
+                        (logger_status == 0U) ? GPIO_PIN_RESET : GPIO_PIN_SET);
     }
 
     /* The driver enforces the sensor's 65 ms minimum measurement interval. */
     (void)LaserPING_StartMeasurement();
-
-    base_result = DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position);
-    shoulder_result = DXL_GetPresentPosition(&hdxl, SHOULDER_ID,
-                                             &shoulder_position);
-    elbow_result = DXL_GetPresentPosition(&hdxl, ELBOW_ID, &elbow_position);
-    wrist_result = DXL_GetPresentPosition(&hdxl, WRIST_ID, &wrist_position);
-
-    if ((base_result == DXL_OK) &&
-        (shoulder_result == DXL_OK) &&
-        (elbow_result == DXL_OK) &&
-        (wrist_result == DXL_OK))
-    {
-      /* Apply home offset so home position displays as 0 degrees */
-      float base_deg = DXL_PositionToAngle(base_position > HOME_BASE_POS ? 
-                                           base_position - HOME_BASE_POS : 
-                                           HOME_BASE_POS - base_position);
-      float shoulder_deg = DXL_PositionToAngle(shoulder_position > HOME_SHOULDER_POS ? 
-                                               shoulder_position - HOME_SHOULDER_POS : 
-                                               HOME_SHOULDER_POS - shoulder_position);
-      float elbow_deg = DXL_PositionToAngle(elbow_position > HOME_ELBOW_POS ? 
-                                            elbow_position - HOME_ELBOW_POS : 
-                                            HOME_ELBOW_POS - elbow_position);
-      float wrist_deg = DXL_PositionToAngle(wrist_position > HOME_WRIST_POS ? 
-                                            wrist_position - HOME_WRIST_POS : 
-                                            HOME_WRIST_POS - wrist_position);
-      length = snprintf(buffer, sizeof(buffer),
-                        "Base:%.2f° Shoulder:%.2f° Elbow:%.2f° Wrist:%.2f°\r\n",
-                        base_deg, shoulder_deg, elbow_deg, wrist_deg);
-      HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin,
-                        GPIO_PIN_RESET);
-    }
-    else
-    {
-      length = snprintf(buffer, sizeof(buffer),
-                        "DXL error Base:%d Shoulder:%d Elbow:%d Wrist:%d\r\n",
-                        (int)base_result,
-                        (int)shoulder_result,
-                        (int)elbow_result,
-                        (int)wrist_result);
-      HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
-    }
-
-    if (length > 0)
-    {
-      size_t transmit_length = (size_t)length;
-      if (transmit_length >= sizeof(buffer))
-      {
-        transmit_length = sizeof(buffer) - 1U;
-      }
-
-      (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
-                              (uint16_t)transmit_length, HAL_MAX_DELAY);
-      (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
-                              (uint16_t)transmit_length, HAL_MAX_DELAY);
-    }
-
-    HAL_Delay(100U);
+    HAL_Delay(1U);
   }
 #endif /* SERVO_ONLY_TEST */
 }
