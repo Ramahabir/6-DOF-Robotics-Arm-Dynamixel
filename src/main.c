@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 #include "dynamixel.h"
@@ -54,142 +55,124 @@ static DXL_HandleTypeDef hdxl;
 #define ELBOW_ID     13U
 #define WRIST_ID       3U
 
-#define TARGET_BASE_POS    512U
-#define TARGET_SHOULDER_POS 315U
-#define TARGET_ELBOW_POS   512U
-#define TARGET_WRIST_POS   512U
-#define POSITION_TOLERANCE  5U
-
-/* Home position offsets - these will be displayed as 0 degrees */
-#define HOME_BASE_POS       512U
-#define HOME_SHOULDER_POS   315U
-#define HOME_ELBOW_POS      512U
-#define HOME_WRIST_POS      512U
-
-#define ANIMATION_POSE_TIMEOUT_MS  5000U
-#define ANIMATION_STABLE_READS      3U
-#define ANIMATION_POSE_HOLD_MS   2000U
-
-typedef struct
-{
-  uint16_t base;
-  uint16_t shoulder;
-  uint16_t elbow;
-  uint16_t wrist;
-  uint16_t speed;
-  uint16_t pause_ms;
-} RobotPose;
-
-/*
- * Dramatic "sentinel wake-up" sequence. The wide scan takes about two
- * seconds, depending on servo load and supply voltage. The final pose is home.
- */
-static const RobotPose startup_animation[] =
-{
-  {512U, 315U, 512U, 512U, 50U, ANIMATION_POSE_HOLD_MS}, /* home */
-  {392U, 315U, 512U, 512U, 50U, ANIMATION_POSE_HOLD_MS}, /* scan left */
-  {632U, 315U, 512U, 512U, 50U, ANIMATION_POSE_HOLD_MS}, /* scan right */
-  {512U, 315U, 512U, 512U, 50U, ANIMATION_POSE_HOLD_MS}, /* center */
-  {512U, 365U, 457U, 402U, 30U, ANIMATION_POSE_HOLD_MS}, /* bow */
-  {512U, 365U, 457U, 622U, 55U, ANIMATION_POSE_HOLD_MS}, /* wrist flick */
-  {512U, 365U, 457U, 512U, 55U, ANIMATION_POSE_HOLD_MS}, /* wrist center */
-  {512U, 315U, 512U, 512U, 25U, ANIMATION_POSE_HOLD_MS}  /* home */
-};
+/* Set to 1 to run the Dynamixel joints and log their telemetry. */
+#define DYNAMIXEL_ENABLED 1U
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static bool Robot_MoveToPose(const RobotPose *pose, uint32_t timeout_ms);
-static bool Robot_PlayStartupAnimation(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static uint16_t PositionDifference(uint16_t actual, uint16_t target)
+static void Robot_ReadAndLogDynamixelTelemetry(void);
+
+static void UART_SendUART1(const char *message)
 {
-  return (actual > target) ? (actual - target) : (target - actual);
+  size_t message_length = strlen(message);
+  if (message_length > 0U)
+  {
+    (void)HAL_UART_Transmit(&huart1, (uint8_t *)message,
+                            (uint16_t)message_length, HAL_MAX_DELAY);
+  }
 }
 
-static bool Robot_MoveToPose(const RobotPose *pose, uint32_t timeout_ms)
+static void Robot_ReadAndLogDynamixelTelemetry(void)
 {
-  uint16_t base;
-  uint16_t shoulder;
-  uint16_t elbow;
-  uint16_t wrist;
-  uint32_t start_ms;
-  uint8_t stable_reads = 0U;
+  char buffer[256];
+  int length;
 
-  if (pose == NULL)
+  static const uint8_t joint_ids[] =
   {
-    return false;
-  }
-
-  if ((DXL_SetMovingSpeed(&hdxl, BASE_ID, pose->speed) != DXL_OK) ||
-      (DXL_SetMovingSpeed(&hdxl, SHOULDER_ID, pose->speed) != DXL_OK) ||
-      (DXL_SetMovingSpeed(&hdxl, ELBOW_ID, pose->speed) != DXL_OK) ||
-      (DXL_SetMovingSpeed(&hdxl, WRIST_ID, pose->speed) != DXL_OK))
+    BASE_ID,
+    SHOULDER_ID,
+    ELBOW_ID,
+    WRIST_ID
+  };
+  static const char *const joint_names[] =
   {
-    return false;
-  }
+    "BASE",
+    "SHD",
+    "ELB",
+    "WRI"
+  };
 
-  if ((DXL_SetGoalPosition(&hdxl, BASE_ID, pose->base) != DXL_OK) ||
-      (DXL_SetGoalPosition(&hdxl, SHOULDER_ID, pose->shoulder) != DXL_OK) ||
-      (DXL_SetGoalPosition(&hdxl, ELBOW_ID, pose->elbow) != DXL_OK) ||
-      (DXL_SetGoalPosition(&hdxl, WRIST_ID, pose->wrist) != DXL_OK))
+  size_t offset = 0U;
+
+  for (size_t i = 0U; i < sizeof(joint_ids) / sizeof(joint_ids[0]); i++)
   {
-    return false;
-  }
+    uint8_t id = joint_ids[i];
+    uint16_t position = 0U;
+    uint16_t speed = 0U;
+    uint8_t voltage_x10 = 0U;
+    uint8_t temperature = 0U;
+    uint16_t load = 0U;
+    bool moving = false;
 
-  start_ms = HAL_GetTick();
-  while ((HAL_GetTick() - start_ms) < timeout_ms)
-  {
-    bool at_target =
-        (DXL_GetPresentPosition(&hdxl, BASE_ID, &base) == DXL_OK) &&
-        (DXL_GetPresentPosition(&hdxl, SHOULDER_ID, &shoulder) == DXL_OK) &&
-        (DXL_GetPresentPosition(&hdxl, ELBOW_ID, &elbow) == DXL_OK) &&
-        (DXL_GetPresentPosition(&hdxl, WRIST_ID, &wrist) == DXL_OK) &&
-        (PositionDifference(base, pose->base) <= POSITION_TOLERANCE) &&
-        (PositionDifference(shoulder, pose->shoulder) <= POSITION_TOLERANCE) &&
-        (PositionDifference(elbow, pose->elbow) <= POSITION_TOLERANCE) &&
-        (PositionDifference(wrist, pose->wrist) <= POSITION_TOLERANCE);
+    bool all_ok =
+        (DXL_GetPresentPosition(&hdxl, id, &position) == DXL_OK) &&
+        (DXL_GetPresentSpeed(&hdxl, id, &speed) == DXL_OK) &&
+        (DXL_GetPresentVoltage(&hdxl, id, &voltage_x10) == DXL_OK) &&
+        (DXL_GetPresentTemperature(&hdxl, id, &temperature) == DXL_OK) &&
+        (DXL_GetPresentLoad(&hdxl, id, &load) == DXL_OK) &&
+        (DXL_IsMoving(&hdxl, id, &moving) == DXL_OK);
 
-    if (at_target)
+    if (!all_ok)
     {
-      stable_reads++;
-      if (stable_reads >= ANIMATION_STABLE_READS)
-      {
-        HAL_Delay(pose->pause_ms);
-        return true;
-      }
+      length = snprintf(
+          &buffer[offset],
+          sizeof(buffer) - offset,
+          "%s%s,ERROR,%d",
+          (i == 0U) ? "" : " ",
+          joint_names[i],
+          (int)hdxl.last_servo_error
+      );
+      offset += (size_t)length;
     }
     else
     {
-      stable_reads = 0U;
-    }
+      /*
+       * AX-12A PRESENT_LOAD is a signed value centered on 0x400:
+       * 0..0x3FF is counterclockwise load, 0x401..0x7FF is clockwise.
+       * Report the raw signed value so the sign can be interpreted.
+       */
+      int16_t signed_load = (int16_t)load;
+      if (load >= 0x400U)
+      {
+        signed_load = (int16_t)load - 0x400;
+      }
+      else
+      {
+        signed_load = (int16_t)load;
+      }
 
-    HAL_Delay(40U);
+      buffer[offset] = (i == 0U) ? '\0' : ' ';
+      offset += (i == 0U) ? 0U : 1U;
+      length = snprintf(
+          &buffer[offset],
+          sizeof(buffer) - offset,
+          "%s,%u,%u,%d,%u,%u,%s",
+          joint_names[i],
+          (unsigned)position,
+          (unsigned)speed,
+          (int)signed_load,
+          (unsigned)voltage_x10,
+          (unsigned)temperature,
+          moving ? "MOV" : "IDL"
+      );
+      offset += (size_t)length;
+    }
   }
 
-  return false;
-}
+  length = snprintf(&buffer[offset], sizeof(buffer) - offset, "\r\n");
+  offset += (size_t)length;
 
-static bool Robot_PlayStartupAnimation(void)
-{
-  size_t pose_index;
-  const size_t pose_count =
-      sizeof(startup_animation) / sizeof(startup_animation[0]);
-
-  for (pose_index = 0U; pose_index < pose_count; pose_index++)
-  {
-    if (!Robot_MoveToPose(&startup_animation[pose_index],
-                          ANIMATION_POSE_TIMEOUT_MS))
-    {
-      return false;
-    }
-  }
-
-  return true;
+  (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
+                          (uint16_t)offset, HAL_MAX_DELAY);
+  (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
+                          (uint16_t)offset, HAL_MAX_DELAY);
 }
 /* USER CODE END 0 */
 
@@ -225,221 +208,62 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   MX_USART6_UART_Init();
+  MX_TIM3_Init();
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 
   /*
    * UART2: PA2=TX, PA3=RX, 1 Mbps, Dynamixel Protocol 1.0.
    * PB0 controls the external half-duplex buffer: high=TX, low=RX.
    */
+#if DYNAMIXEL_ENABLED  /* ===== Dynamixel active ===== */
   DXL_Init(&hdxl, &huart2, GPIOB, GPIO_PIN_0);
   HAL_Delay(500U);
 
-  /* ========== STARTUP INITIALIZATION SEQUENCE ========== */
   uint16_t base_position, shoulder_position, elbow_position, wrist_position;
-  uint16_t attempts = 0;
-  const uint16_t MAX_ATTEMPTS = 500;  /* ~50 seconds at 100ms polling */
   char buffer[128];
   int length;
-  bool init_success = false;
 
-  /* Enable torque on all servos */
-  DXL_SetTorque(&hdxl, BASE_ID, true);
-  DXL_SetTorque(&hdxl, SHOULDER_ID, true);
-  DXL_SetTorque(&hdxl, ELBOW_ID, true);
-  DXL_SetTorque(&hdxl, WRIST_ID, true);
+  DXL_SetTorque(&hdxl, BASE_ID, false);
+  DXL_SetTorque(&hdxl, SHOULDER_ID, false);
+  DXL_SetTorque(&hdxl, ELBOW_ID, false);
+  DXL_SetTorque(&hdxl, WRIST_ID, false);
   HAL_Delay(100U);
 
-  /* Set moderate movement speed for all servos */
-  DXL_SetMovingSpeed(&hdxl, BASE_ID, 256);
-  DXL_SetMovingSpeed(&hdxl, SHOULDER_ID, 256);
-  DXL_SetMovingSpeed(&hdxl, ELBOW_ID, 256);
-  DXL_SetMovingSpeed(&hdxl, WRIST_ID, 256);
-  HAL_Delay(100U);
-
-  /* Set initial goal positions */
-  DXL_SetGoalPosition(&hdxl, BASE_ID, TARGET_BASE_POS);
-  DXL_SetGoalPosition(&hdxl, SHOULDER_ID, TARGET_SHOULDER_POS);
-  DXL_SetGoalPosition(&hdxl, ELBOW_ID, TARGET_ELBOW_POS);
-  DXL_SetGoalPosition(&hdxl, WRIST_ID, TARGET_WRIST_POS);
-  HAL_Delay(500U);
-
-  /* Print startup message */
   length = snprintf(buffer, sizeof(buffer),
-                    "Robot startup: Moving to initial position...\r\n");
-  if (length > 0) {
-    HAL_UART_Transmit(&huart1, (uint8_t *)buffer, (uint16_t)length, HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart6, (uint8_t *)buffer, (uint16_t)length, HAL_MAX_DELAY);
-  }
-
-  /* Wait for all servos to reach target positions */
-  while (attempts < MAX_ATTEMPTS && !init_success) {
-    DXL_Result base_result = DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position);
-    DXL_Result shoulder_result = DXL_GetPresentPosition(&hdxl, SHOULDER_ID, &shoulder_position);
-    DXL_Result elbow_result = DXL_GetPresentPosition(&hdxl, ELBOW_ID, &elbow_position);
-    DXL_Result wrist_result = DXL_GetPresentPosition(&hdxl, WRIST_ID, &wrist_position);
-
-    /* Check if all positions are within tolerance */
-    if ((base_result == DXL_OK) && (shoulder_result == DXL_OK) &&
-        (elbow_result == DXL_OK) && (wrist_result == DXL_OK)) {
-      
-      int base_diff = (base_position > TARGET_BASE_POS) ? 
-                      (base_position - TARGET_BASE_POS) : 
-                      (TARGET_BASE_POS - base_position);
-      int shoulder_diff = (shoulder_position > TARGET_SHOULDER_POS) ? 
-                          (shoulder_position - TARGET_SHOULDER_POS) : 
-                          (TARGET_SHOULDER_POS - shoulder_position);
-      int elbow_diff = (elbow_position > TARGET_ELBOW_POS) ? 
-                       (elbow_position - TARGET_ELBOW_POS) : 
-                       (TARGET_ELBOW_POS - elbow_position);
-      int wrist_diff = (wrist_position > TARGET_WRIST_POS) ? 
-                       (wrist_position - TARGET_WRIST_POS) : 
-                       (TARGET_WRIST_POS - wrist_position);
-
-      if ((base_diff <= POSITION_TOLERANCE) &&
-          (shoulder_diff <= POSITION_TOLERANCE) &&
-          (elbow_diff <= POSITION_TOLERANCE) &&
-          (wrist_diff <= POSITION_TOLERANCE)) {
-        init_success = true;
-        break;
-      }
-    }
-
-    attempts++;
-    HAL_Delay(100U);
-  }
-
-  /* Print initialization result */
-  if (init_success) {
-    /* Apply home offset so home position displays as 0 degrees */
-    float base_deg = DXL_PositionToAngle(base_position > HOME_BASE_POS ? 
-                                         base_position - HOME_BASE_POS : 
-                                         HOME_BASE_POS - base_position);
-    float shoulder_deg = DXL_PositionToAngle(shoulder_position > HOME_SHOULDER_POS ? 
-                                             shoulder_position - HOME_SHOULDER_POS : 
-                                             HOME_SHOULDER_POS - shoulder_position);
-    float elbow_deg = DXL_PositionToAngle(elbow_position > HOME_ELBOW_POS ? 
-                                          elbow_position - HOME_ELBOW_POS : 
-                                          HOME_ELBOW_POS - elbow_position);
-    float wrist_deg = DXL_PositionToAngle(wrist_position > HOME_WRIST_POS ? 
-                                          wrist_position - HOME_WRIST_POS : 
-                                          HOME_WRIST_POS - wrist_position);
-    length = snprintf(buffer, sizeof(buffer),
-                      "[SUCCESS] Robot at initial position: B:%.2f° S:%.2f° E:%.2f° W:%.2f°\r\n",
-                      base_deg, shoulder_deg, elbow_deg, wrist_deg);
-    HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin, GPIO_PIN_RESET);
-  } else {
-    length = snprintf(buffer, sizeof(buffer),
-                      "[FAILED] Timeout reaching initial position (attempts: %u)\r\n",
-                      attempts);
-    HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin, GPIO_PIN_SET);
-  }
-
-  if (length > 0) {
-    HAL_UART_Transmit(&huart1, (uint8_t *)buffer, (uint16_t)length, HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart6, (uint8_t *)buffer, (uint16_t)length, HAL_MAX_DELAY);
-  }
-
-  /* Play the wake-up sequence only after the robot has safely reached home. */
-  if (init_success)
+                    "Dynamixel ready (torque off)\r\n");
+  if (length > 0)
   {
-    length = snprintf(buffer, sizeof(buffer),
-                      "Robot startup: Playing sentinel animation...\r\n");
-    if (length > 0)
-    {
-      HAL_UART_Transmit(&huart1, (uint8_t *)buffer, (uint16_t)length,
-                        HAL_MAX_DELAY);
-      HAL_UART_Transmit(&huart6, (uint8_t *)buffer, (uint16_t)length,
-                        HAL_MAX_DELAY);
-    }
-
-    if (Robot_PlayStartupAnimation())
-    {
-      length = snprintf(buffer, sizeof(buffer),
-                        "[SUCCESS] Animation complete; robot is home.\r\n");
-      HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin,
-                        GPIO_PIN_RESET);
-    }
-    else
-    {
-      length = snprintf(buffer, sizeof(buffer),
-                        "[FAILED] Animation stopped: servo error or timeout.\r\n");
-      HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin,
-                        GPIO_PIN_SET);
-    }
-
-    if (length > 0)
-    {
-      HAL_UART_Transmit(&huart1, (uint8_t *)buffer, (uint16_t)length,
-                        HAL_MAX_DELAY);
-      HAL_UART_Transmit(&huart6, (uint8_t *)buffer, (uint16_t)length,
-                        HAL_MAX_DELAY);
-    }
+    UART_SendUART1(buffer);
   }
-
-  /* ========== END STARTUP SEQUENCE ========== */
+#endif /* DYNAMIXEL_ENABLED */
 
   while (1)
   {
-    DXL_Result base_result;
-    DXL_Result shoulder_result;
-    DXL_Result elbow_result;
-    DXL_Result wrist_result;
+#if DYNAMIXEL_ENABLED
+    bool positions_ok =
+        (DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position) == DXL_OK) &&
+        (DXL_GetPresentPosition(&hdxl, SHOULDER_ID, &shoulder_position) == DXL_OK) &&
+        (DXL_GetPresentPosition(&hdxl, ELBOW_ID, &elbow_position) == DXL_OK) &&
+        (DXL_GetPresentPosition(&hdxl, WRIST_ID, &wrist_position) == DXL_OK);
 
-    base_result = DXL_GetPresentPosition(&hdxl, BASE_ID, &base_position);
-    shoulder_result = DXL_GetPresentPosition(&hdxl, SHOULDER_ID,
-                                             &shoulder_position);
-    elbow_result = DXL_GetPresentPosition(&hdxl, ELBOW_ID, &elbow_position);
-    wrist_result = DXL_GetPresentPosition(&hdxl, WRIST_ID, &wrist_position);
-
-    if ((base_result == DXL_OK) &&
-        (shoulder_result == DXL_OK) &&
-        (elbow_result == DXL_OK) &&
-        (wrist_result == DXL_OK))
+    if (positions_ok)
     {
-      /* Apply home offset so home position displays as 0 degrees */
-      float base_deg = DXL_PositionToAngle(base_position > HOME_BASE_POS ? 
-                                           base_position - HOME_BASE_POS : 
-                                           HOME_BASE_POS - base_position);
-      float shoulder_deg = DXL_PositionToAngle(shoulder_position > HOME_SHOULDER_POS ? 
-                                               shoulder_position - HOME_SHOULDER_POS : 
-                                               HOME_SHOULDER_POS - shoulder_position);
-      float elbow_deg = DXL_PositionToAngle(elbow_position > HOME_ELBOW_POS ? 
-                                            elbow_position - HOME_ELBOW_POS : 
-                                            HOME_ELBOW_POS - elbow_position);
-      float wrist_deg = DXL_PositionToAngle(wrist_position > HOME_WRIST_POS ? 
-                                            wrist_position - HOME_WRIST_POS : 
-                                            HOME_WRIST_POS - wrist_position);
-      length = snprintf(buffer, sizeof(buffer),
-                        "Base:%.2f° Shoulder:%.2f° Elbow:%.2f° Wrist:%.2f°\r\n",
-                        base_deg, shoulder_deg, elbow_deg, wrist_deg);
       HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin,
                         GPIO_PIN_RESET);
+
+      Robot_ReadAndLogDynamixelTelemetry();
     }
     else
     {
       length = snprintf(buffer, sizeof(buffer),
-                        "DXL error Base:%d Shoulder:%d Elbow:%d Wrist:%d\r\n",
-                        (int)base_result,
-                        (int)shoulder_result,
-                        (int)elbow_result,
-                        (int)wrist_result);
+                        "DXL error reading positions err=%d\r\n",
+                        (int)hdxl.last_servo_error);
       HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
     }
 
-    if (length > 0)
-    {
-      size_t transmit_length = (size_t)length;
-      if (transmit_length >= sizeof(buffer))
-      {
-        transmit_length = sizeof(buffer) - 1U;
-      }
+#endif /* DYNAMIXEL_ENABLED */
 
-      (void)HAL_UART_Transmit(&huart1, (uint8_t *)buffer,
-                              (uint16_t)transmit_length, HAL_MAX_DELAY);
-      (void)HAL_UART_Transmit(&huart6, (uint8_t *)buffer,
-                              (uint16_t)transmit_length, HAL_MAX_DELAY);
-    }
-
-    HAL_Delay(100U);
+    HAL_Delay(200U);
   }
 }
 //   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);

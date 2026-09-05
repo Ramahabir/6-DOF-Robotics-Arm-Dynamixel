@@ -76,5 +76,15 @@ DXL_Result DXL_SetGoalPosition(DXL_HandleTypeDef *dxl, uint8_t id, uint16_t posi
 DXL_Result DXL_SetMovingSpeed(DXL_HandleTypeDef *dxl, uint8_t id, uint16_t speed);
 
 DXL_Result DXL_GetPresentPosition(DXL_HandleTypeDef *dxl, uint8_t id, uint16_t *position);
+
+DXL_Result DXL_GetPresentSpeed(DXL_HandleTypeDef *dxl, uint8_t id, uint16_t *speed);
+
+DXL_Result DXL_GetPresentVoltage(DXL_HandleTypeDef *dxl, uint8_t id, uint8_t *voltage_tenths);
+
+DXL_Result DXL_GetPresentTemperature(DXL_HandleTypeDef *dxl, uint8_t id, uint8_t *temperature);
+
+DXL_Result DXL_GetPresentLoad(DXL_HandleTypeDef *dxl, uint8_t id, uint16_t *load);
+
+DXL_Result DXL_IsMoving(DXL_HandleTypeDef *dxl, uint8_t id, bool *is_moving);
 #endif
 

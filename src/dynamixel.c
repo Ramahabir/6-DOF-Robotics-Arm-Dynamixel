@@ -618,6 +618,92 @@ DXL_Result DXL_GetPresentPosition(DXL_HandleTypeDef *dxl,
     );
 }
 
+DXL_Result DXL_GetPresentSpeed(DXL_HandleTypeDef *dxl,
+                               uint8_t id,
+                               uint16_t *speed)
+{
+    return DXL_Read16(
+        dxl,
+        id,
+        DXL_ADDR_PRESENT_SPEED,
+        speed
+    );
+}
+
+DXL_Result DXL_GetPresentVoltage(DXL_HandleTypeDef *dxl,
+                                 uint8_t id,
+                                 uint8_t *voltage_tenths)
+{
+    uint8_t value = 0U;
+    DXL_Result result = DXL_Read8(
+        dxl,
+        id,
+        DXL_ADDR_PRESENT_VOLTAGE,
+        &value
+    );
+
+    if (result != DXL_OK)
+    {
+        return result;
+    }
+
+    if (voltage_tenths != NULL)
+    {
+        *voltage_tenths = value;
+    }
+
+    return DXL_OK;
+}
+
+DXL_Result DXL_GetPresentTemperature(DXL_HandleTypeDef *dxl,
+                                     uint8_t id,
+                                     uint8_t *temperature)
+{
+    return DXL_Read8(
+        dxl,
+        id,
+        DXL_ADDR_PRESENT_TEMP,
+        temperature
+    );
+}
+
+DXL_Result DXL_GetPresentLoad(DXL_HandleTypeDef *dxl,
+                              uint8_t id,
+                              uint16_t *load)
+{
+    return DXL_Read16(
+        dxl,
+        id,
+        DXL_ADDR_PRESENT_LOAD,
+        load
+    );
+}
+
+DXL_Result DXL_IsMoving(DXL_HandleTypeDef *dxl,
+                        uint8_t id,
+                        bool *is_moving)
+{
+    uint8_t value = 0U;
+    DXL_Result result = DXL_Read8(
+        dxl,
+        id,
+        DXL_ADDR_MOVING,
+        &value
+    );
+
+    if (result != DXL_OK)
+    {
+        return result;
+    }
+
+    if (is_moving != NULL)
+    {
+        *is_moving = (value != 0U);
+    }
+
+    return DXL_OK;
+}
+
 float DXL_PositionToAngle(uint16_t position)
 {
     return ((float)position * 300.0f / 1023.0f);
